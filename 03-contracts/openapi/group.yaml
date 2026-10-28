@@ -1,0 +1,363 @@
+openapi: 3.0.3
+info:
+  title: Group Service API
+  version: 0.1.0
+  description: |
+    Группы, участники и адреса доставки.
+    Ответственный: Анзор.
+    Пути /api/v1 доступны через API Gateway, пути /internal только внутри сети сервисов.
+servers:
+  - url: http://api-gateway
+    description: Через API Gateway
+  - url: http://group-service:8080
+    description: Внутренний адрес
+tags:
+  - name: groups
+    description: Группы
+  - name: participants
+    description: Участники
+  - name: internal
+    description: Вызовы от других сервисов
+
+paths:
+  /api/v1/groups:
+    post:
+      tags: [groups]
+      operationId: createGroup
+      summary: Создать группу
+      description: Создатель группы сразу становится ее участником и организатором.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGroupRequest' }
+      responses:
+        '201':
+          description: Группа создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/groups/{groupId}:
+    get:
+      tags: [groups]
+      operationId: getGroup
+      summary: Данные группы
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Группа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+
+  /api/v1/groups/{groupId}/participants:
+    post:
+      tags: [participants]
+      operationId: joinGroup
+      summary: Вступить в группу
+      description: После вступления публикуется событие group.participant-joined.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinGroupRequest' }
+      responses:
+        '201':
+          description: Участник добавлен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Participant' }
+        '403':
+          description: Неверный код приглашения (INVALID_INVITE_CODE)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '409':
+          description: Уже участник (ALREADY_JOINED) или регистрация закрыта (REGISTRATION_CLOSED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [participants]
+      operationId: listParticipants
+      summary: Список участников (только имена)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Участники группы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ParticipantPublic' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+
+  /api/v1/groups/{groupId}/participants/me/address:
+    put:
+      tags: [participants]
+      operationId: updateMyAddress
+      summary: Изменить свой адрес доставки
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeliveryAddress' }
+      responses:
+        '200':
+          description: Адрес изменен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Participant' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+
+  /api/v1/groups/{groupId}/participants/me:
+    delete:
+      tags: [participants]
+      operationId: leaveGroup
+      summary: Выйти из группы
+      description: |
+        Участник получает статус LEFT, публикуется событие group.participant-left.
+        Перестройку пар и отмену заказов выполняют Draw Service и Order Service.
+        Выйти нельзя, если подарок от участника или для него уже передан в доставку
+        (Group Service знает об этом из события order.gift-shipped), и если после выхода
+        в группе останется меньше 2 участников.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '204':
+          description: Участник вышел
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '409':
+          description: |
+            Подарок от участника или для него уже в доставке (GIFT_ALREADY_SHIPPED),
+            после выхода останется меньше 2 участников (TOO_FEW_PARTICIPANTS),
+            группа уже завершена (INVALID_STATE)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/groups/{groupId}/close-registration:
+    post:
+      tags: [groups]
+      operationId: closeRegistration
+      summary: Закрыть регистрацию
+      description: |
+        Только организатор. Группа переходит в REGISTRATION_CLOSED, публикуется
+        событие group.registration-closed. Жеребьевка выполняется асинхронно.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '202':
+          description: Регистрация закрыта, жеребьевка запущена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '403':
+          description: Действие доступно только организатору (NOT_ORGANIZER)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '409':
+          description: Меньше 3 участников (NOT_ENOUGH_PARTICIPANTS) или регистрация уже закрыта (REGISTRATION_CLOSED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /internal/groups/{groupId}/participants/{participantId}/address:
+    get:
+      tags: [internal]
+      operationId: getParticipantAddress
+      security: []
+      summary: Адрес подопечного
+      description: Вызывает только Order Service при оформлении заказа на маркетплейсе.
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/ParticipantId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Адрес и имя получателя
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecipientAddress' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '409':
+          description: Участник вышел из группы (INVALID_STATE)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ParticipantId:
+      name: participantId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Сквозной идентификатор запроса для логов
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Ошибка в данных запроса
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    GroupNotFound:
+      description: Группы нет или пользователь в ней не состоит (GROUP_NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: Сумма в копейках
+          example: 200000
+        currency:
+          type: string
+          example: RUB
+
+    DeliveryAddress:
+      type: object
+      required: [postalCode, city, street, house, phone]
+      properties:
+        postalCode: { type: string, example: '101000' }
+        city: { type: string, example: Москва }
+        street: { type: string, example: Мясницкая улица }
+        house: { type: string, example: '20' }
+        apartment: { type: string, example: '15' }
+        phone: { type: string, example: '+79990000000' }
+
+    GroupStatus:
+      type: string
+      enum: [OPEN, REGISTRATION_CLOSED, DRAWN, FINISHED]
+
+    ParticipantStatus:
+      type: string
+      enum: [ACTIVE, LEFT]
+
+    ParticipantData:
+      type: object
+      required: [displayName, email, deliveryAddress]
+      properties:
+        displayName: { type: string, example: Алиса }
+        email: { type: string, format: email }
+        telegramChatId: { type: string }
+        deliveryAddress: { $ref: '#/components/schemas/DeliveryAddress' }
+
+    CreateGroupRequest:
+      type: object
+      required: [name, budget, registrationDeadline, giftDeadline, organizer]
+      properties:
+        name: { type: string, example: Новый год с друзьями }
+        budget: { $ref: '#/components/schemas/Money' }
+        registrationDeadline: { type: string, format: date-time }
+        giftDeadline: { type: string, format: date-time }
+        organizer: { $ref: '#/components/schemas/ParticipantData' }
+
+    JoinGroupRequest:
+      allOf:
+        - $ref: '#/components/schemas/ParticipantData'
+        - type: object
+          required: [inviteCode]
+          properties:
+            inviteCode: { type: string, example: SNOW-4821 }
+
+    Group:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        organizerParticipantId: { type: string, format: uuid }
+        inviteCode:
+          type: string
+          description: Возвращается только организатору
+        budget: { $ref: '#/components/schemas/Money' }
+        registrationDeadline: { type: string, format: date-time }
+        giftDeadline: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/GroupStatus' }
+        createdAt: { type: string, format: date-time }
+
+    Participant:
+      type: object
+      description: Полные данные участника, видны только ему самому
+      properties:
+        id: { type: string, format: uuid }
+        groupId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, format: email }
+        telegramChatId: { type: string }
+        deliveryAddress: { $ref: '#/components/schemas/DeliveryAddress' }
+        status: { $ref: '#/components/schemas/ParticipantStatus' }
+        joinedAt: { type: string, format: date-time }
+        leftAt: { type: string, format: date-time, nullable: true }
+
+    ParticipantPublic:
+      type: object
+      description: Данные участника, которые видят остальные
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        status: { $ref: '#/components/schemas/ParticipantStatus' }
+
+    RecipientAddress:
+      type: object
+      properties:
+        participantId: { type: string, format: uuid }
+        displayName: { type: string }
+        deliveryAddress: { $ref: '#/components/schemas/DeliveryAddress' }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: GROUP_NOT_FOUND }
+        message: { type: string }
+        requestId: { type: string, format: uuid }

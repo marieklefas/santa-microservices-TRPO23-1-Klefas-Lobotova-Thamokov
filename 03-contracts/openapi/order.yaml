@@ -1,0 +1,267 @@
+openapi: 3.0.3
+info:
+  title: Order Service API
+  version: 0.1.0
+  description: |
+    Выбор и заказ подарка. Order Service — оркестратор саги заказа подарка.
+    Ответственный: Алиса.
+servers:
+  - url: http://api-gateway
+    description: Через API Gateway
+  - url: http://order-service:8080
+    description: Внутренний адрес
+
+paths:
+  /api/v1/groups/{groupId}/catalog/products:
+    get:
+      operationId: searchProducts
+      summary: Товары маркетплейса в пределах бюджета группы
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+        - name: query
+          in: query
+          description: Строка поиска
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+      responses:
+        '200':
+          description: Найденные товары (цена не выше бюджета)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductPage' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/v1/groups/{groupId}/gift-orders:
+    post:
+      operationId: createGiftOrder
+      summary: Заказать подарок подопечному
+      description: |
+        Создает заказ в статусе PENDING и запускает сагу асинхронно, поэтому ответ 202.
+        Статус заказа клиент узнает через getMyGiftOrder или из уведомления.
+        Повтор с тем же Idempotency-Key возвращает тот же заказ.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: UUID, который генерирует клиент
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGiftOrderRequest' }
+      responses:
+        '202':
+          description: Заказ принят, сага запущена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GiftOrder' }
+        '404': { $ref: '#/components/responses/GroupNotFound' }
+        '409':
+          description: |
+            Уже есть активный заказ (GIFT_ORDER_ALREADY_EXISTS),
+            жеребьевки еще не было (DRAW_NOT_COMPLETED) или товар закончился (OUT_OF_STOCK)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Товар дороже бюджета (PRICE_EXCEEDS_BUDGET) или ключ повторно использован с другим телом (IDEMPOTENCY_KEY_REUSED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /api/v1/groups/{groupId}/gift-orders/my:
+    get:
+      operationId: getMyGiftOrder
+      summary: Мой последний заказ подарка в группе
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Заказ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GiftOrder' }
+        '404': { $ref: '#/components/responses/GiftOrderNotFound' }
+
+  /api/v1/gift-orders/{giftOrderId}:
+    get:
+      operationId: getGiftOrder
+      summary: Заказ по id (доступен только Санте этого заказа)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: giftOrderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Заказ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GiftOrder' }
+        '404': { $ref: '#/components/responses/GiftOrderNotFound' }
+
+  /webhooks/marketplace:
+    post:
+      operationId: handleMarketplaceWebhook
+      security: []
+      summary: Статусы доставки от маркетплейса
+      description: |
+        Маркетплейс повторяет вебхук, пока не получит 200, поэтому обработка идемпотентна
+        по webhookId. Подпись проверяется по заголовку X-Signature.
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarketplaceWebhook' }
+      responses:
+        '200':
+          description: Принято (в том числе повторно)
+        '401':
+          description: Неверная подпись
+        '404': { $ref: '#/components/responses/GiftOrderNotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+
+  responses:
+    GroupNotFound:
+      description: Группы нет или пользователь в ней не состоит (GROUP_NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    GiftOrderNotFound:
+      description: Заказа нет (GIFT_ORDER_NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Маркетплейс или другая зависимость недоступна (SERVICE_UNAVAILABLE)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: Сумма в копейках
+          example: 199000
+        currency: { type: string, example: RUB }
+
+    Product:
+      type: object
+      properties:
+        productId: { type: string }
+        name: { type: string, example: Набор чая }
+        price: { $ref: '#/components/schemas/Money' }
+        imageUrl: { type: string, format: uri }
+        inStock: { type: boolean }
+
+    ProductPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Product' }
+        page: { type: integer }
+        totalPages: { type: integer }
+
+    CreateGiftOrderRequest:
+      type: object
+      required: [productId, paymentMethodToken]
+      properties:
+        productId: { type: string }
+        paymentMethodToken:
+          type: string
+          description: Токен карты от платежного провайдера
+
+    GiftOrderStatus:
+      type: string
+      enum: [PENDING, PAYMENT_HELD, ORDERED, PAID, SHIPPED, DELIVERED, FAILED, CANCELLED]
+
+    FailureReason:
+      type: string
+      enum:
+        - OUT_OF_STOCK
+        - PAYMENT_DECLINED
+        - PRICE_EXCEEDS_BUDGET
+        - MARKETPLACE_UNAVAILABLE
+        - PAYMENT_PROVIDER_UNAVAILABLE
+        - PARTICIPANT_LEFT
+        - PRICE_CHANGED
+        - TIMEOUT
+
+    GiftOrder:
+      type: object
+      description: Заказ глазами Санты (без адреса подопечного и внутренних полей саги)
+      properties:
+        id: { type: string, format: uuid }
+        groupId: { type: string, format: uuid }
+        recipientParticipantId: { type: string, format: uuid }
+        productId: { type: string }
+        productName: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        status: { $ref: '#/components/schemas/GiftOrderStatus' }
+        failureReason:
+          allOf:
+            - $ref: '#/components/schemas/FailureReason'
+          type: string
+          nullable: true
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    MarketplaceWebhook:
+      type: object
+      required: [webhookId, eventType, marketplaceOrderId, occurredAt]
+      properties:
+        webhookId: { type: string }
+        eventType:
+          type: string
+          enum: [ORDER_SHIPPED, ORDER_DELIVERED]
+        marketplaceOrderId: { type: string }
+        occurredAt: { type: string, format: date-time }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: OUT_OF_STOCK }
+        message: { type: string }
+        requestId: { type: string, format: uuid }

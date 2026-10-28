@@ -1,0 +1,523 @@
+asyncapi: 3.0.0
+info:
+  title: Тайный Санта — события
+  version: 0.1.0
+  description: |
+    Все события системы. Брокер RabbitMQ: у каждого сервиса-источника свой exchange
+    типа topic (group.events, draw.events, order.events), routing key равен типу события.
+    Очередь потребителя называется <сервис-потребитель>.<exchange>, у каждой очереди есть .dlq.
+    Каждый канал ниже соответствует одному типу события (routing key).
+    События публикуются через outbox (ADR-003), потребители отбрасывают повторы по eventId (ADR-004).
+    Ответственный: Анзор.
+
+servers:
+  rabbitmq:
+    host: rabbitmq:5672
+    protocol: amqp
+    description: Брокер сообщений
+
+defaultContentType: application/json
+
+channels:
+  groupParticipantJoined:
+    address: group.participant-joined
+    description: Участник вступил в группу
+    messages:
+      groupParticipantJoined: { $ref: '#/components/messages/GroupParticipantJoined' }
+    bindings: { $ref: '#/components/channelBindings/groupEvents' }
+
+  groupParticipantLeft:
+    address: group.participant-left
+    description: Участник вышел из группы
+    messages:
+      groupParticipantLeft: { $ref: '#/components/messages/GroupParticipantLeft' }
+    bindings: { $ref: '#/components/channelBindings/groupEvents' }
+
+  groupRegistrationClosed:
+    address: group.registration-closed
+    description: Организатор закрыл регистрацию, пора проводить жеребьевку
+    messages:
+      groupRegistrationClosed: { $ref: '#/components/messages/GroupRegistrationClosed' }
+    bindings: { $ref: '#/components/channelBindings/groupEvents' }
+
+  drawCompleted:
+    address: draw.completed
+    description: Жеребьевка проведена
+    messages:
+      drawCompleted: { $ref: '#/components/messages/DrawCompleted' }
+    bindings: { $ref: '#/components/channelBindings/drawEvents' }
+
+  drawReassigned:
+    address: draw.reassigned
+    description: Пары перестроены после выхода участника
+    messages:
+      drawReassigned: { $ref: '#/components/messages/DrawReassigned' }
+    bindings: { $ref: '#/components/channelBindings/drawEvents' }
+
+  orderGiftOrdered:
+    address: order.gift-ordered
+    description: Подарок заказан и оплачен
+    messages:
+      orderGiftOrdered: { $ref: '#/components/messages/OrderGiftOrdered' }
+    bindings: { $ref: '#/components/channelBindings/orderEvents' }
+
+  orderGiftFailed:
+    address: order.gift-failed
+    description: Сага заказа не удалась, компенсации выполнены
+    messages:
+      orderGiftFailed: { $ref: '#/components/messages/OrderGiftFailed' }
+    bindings: { $ref: '#/components/channelBindings/orderEvents' }
+
+  orderGiftCancelled:
+    address: order.gift-cancelled
+    description: Заказ отменен (например, участник вышел)
+    messages:
+      orderGiftCancelled: { $ref: '#/components/messages/OrderGiftCancelled' }
+    bindings: { $ref: '#/components/channelBindings/orderEvents' }
+
+  orderGiftShipped:
+    address: order.gift-shipped
+    description: Подарок передан в доставку
+    messages:
+      orderGiftShipped: { $ref: '#/components/messages/OrderGiftShipped' }
+    bindings: { $ref: '#/components/channelBindings/orderEvents' }
+
+  orderGiftDelivered:
+    address: order.gift-delivered
+    description: Подарок доставлен
+    messages:
+      orderGiftDelivered: { $ref: '#/components/messages/OrderGiftDelivered' }
+    bindings: { $ref: '#/components/channelBindings/orderEvents' }
+
+operations:
+  # ---------- Group Service публикует ----------
+  groupService_publishParticipantJoined:
+    action: send
+    channel: { $ref: '#/channels/groupParticipantJoined' }
+    summary: Group Service публикует событие после вступления участника
+    tags: [{ name: group-service }]
+    messages: [{ $ref: '#/channels/groupParticipantJoined/messages/groupParticipantJoined' }]
+  groupService_publishParticipantLeft:
+    action: send
+    channel: { $ref: '#/channels/groupParticipantLeft' }
+    summary: Group Service публикует событие после выхода участника
+    tags: [{ name: group-service }]
+    messages: [{ $ref: '#/channels/groupParticipantLeft/messages/groupParticipantLeft' }]
+  groupService_publishRegistrationClosed:
+    action: send
+    channel: { $ref: '#/channels/groupRegistrationClosed' }
+    summary: Group Service публикует событие после закрытия регистрации
+    tags: [{ name: group-service }]
+    messages: [{ $ref: '#/channels/groupRegistrationClosed/messages/groupRegistrationClosed' }]
+
+  # ---------- Draw Service ----------
+  drawService_receiveRegistrationClosed:
+    action: receive
+    channel: { $ref: '#/channels/groupRegistrationClosed' }
+    summary: Проводит жеребьевку
+    tags: [{ name: draw-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupRegistrationClosed/messages/groupRegistrationClosed' }]
+  drawService_receiveParticipantLeft:
+    action: receive
+    channel: { $ref: '#/channels/groupParticipantLeft' }
+    summary: Перестраивает пары, если жеребьевка уже проведена
+    tags: [{ name: draw-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupParticipantLeft/messages/groupParticipantLeft' }]
+  drawService_publishCompleted:
+    action: send
+    channel: { $ref: '#/channels/drawCompleted' }
+    summary: Draw Service публикует результат жеребьевки
+    tags: [{ name: draw-service }]
+    messages: [{ $ref: '#/channels/drawCompleted/messages/drawCompleted' }]
+  drawService_publishReassigned:
+    action: send
+    channel: { $ref: '#/channels/drawReassigned' }
+    summary: Draw Service публикует новую пару после перестройки
+    tags: [{ name: draw-service }]
+    messages: [{ $ref: '#/channels/drawReassigned/messages/drawReassigned' }]
+
+  # ---------- Order Service ----------
+  orderService_receiveRegistrationClosed:
+    action: receive
+    channel: { $ref: '#/channels/groupRegistrationClosed' }
+    summary: Сохраняет участников и бюджет группы
+    tags: [{ name: order-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupRegistrationClosed/messages/groupRegistrationClosed' }]
+  orderService_receiveParticipantLeft:
+    action: receive
+    channel: { $ref: '#/channels/groupParticipantLeft' }
+    summary: Отменяет незавершенные заказы, где вышедший участник — Санта или подопечный
+    tags: [{ name: order-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupParticipantLeft/messages/groupParticipantLeft' }]
+  orderService_receiveDrawCompleted:
+    action: receive
+    channel: { $ref: '#/channels/drawCompleted' }
+    summary: Сохраняет копию пар
+    tags: [{ name: order-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/drawCompleted/messages/drawCompleted' }]
+  orderService_receiveDrawReassigned:
+    action: receive
+    channel: { $ref: '#/channels/drawReassigned' }
+    summary: Обновляет копию пар
+    tags: [{ name: order-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/drawReassigned/messages/drawReassigned' }]
+  orderService_publishGiftOrdered:
+    action: send
+    channel: { $ref: '#/channels/orderGiftOrdered' }
+    tags: [{ name: order-service }]
+    messages: [{ $ref: '#/channels/orderGiftOrdered/messages/orderGiftOrdered' }]
+  orderService_publishGiftFailed:
+    action: send
+    channel: { $ref: '#/channels/orderGiftFailed' }
+    tags: [{ name: order-service }]
+    messages: [{ $ref: '#/channels/orderGiftFailed/messages/orderGiftFailed' }]
+  orderService_publishGiftCancelled:
+    action: send
+    channel: { $ref: '#/channels/orderGiftCancelled' }
+    tags: [{ name: order-service }]
+    messages: [{ $ref: '#/channels/orderGiftCancelled/messages/orderGiftCancelled' }]
+  orderService_publishGiftShipped:
+    action: send
+    channel: { $ref: '#/channels/orderGiftShipped' }
+    tags: [{ name: order-service }]
+    messages: [{ $ref: '#/channels/orderGiftShipped/messages/orderGiftShipped' }]
+  orderService_publishGiftDelivered:
+    action: send
+    channel: { $ref: '#/channels/orderGiftDelivered' }
+    tags: [{ name: order-service }]
+    messages: [{ $ref: '#/channels/orderGiftDelivered/messages/orderGiftDelivered' }]
+
+  # ---------- Notification Service получает ----------
+  notificationService_receiveParticipantJoined:
+    action: receive
+    channel: { $ref: '#/channels/groupParticipantJoined' }
+    summary: Сохраняет контакты, отправляет WELCOME
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupParticipantJoined/messages/groupParticipantJoined' }]
+  notificationService_receiveParticipantLeft:
+    action: receive
+    channel: { $ref: '#/channels/groupParticipantLeft' }
+    summary: Перестает отправлять уведомления вышедшему участнику
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/groupParticipantLeft/messages/groupParticipantLeft' }]
+  notificationService_receiveDrawCompleted:
+    action: receive
+    channel: { $ref: '#/channels/drawCompleted' }
+    summary: Отправляет каждому Санте DRAW_RESULT
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/drawCompleted/messages/drawCompleted' }]
+  notificationService_receiveDrawReassigned:
+    action: receive
+    channel: { $ref: '#/channels/drawReassigned' }
+    summary: Отправляет Санте RECIPIENT_CHANGED
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/drawReassigned/messages/drawReassigned' }]
+  notificationService_receiveGiftOrdered:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftOrdered' }
+    summary: Отправляет Санте GIFT_ORDERED
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftOrdered/messages/orderGiftOrdered' }]
+  notificationService_receiveGiftFailed:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftFailed' }
+    summary: Отправляет Санте CHOOSE_ANOTHER_GIFT
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftFailed/messages/orderGiftFailed' }]
+  notificationService_receiveGiftCancelled:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftCancelled' }
+    summary: Отправляет Санте GIFT_CANCELLED
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftCancelled/messages/orderGiftCancelled' }]
+  groupService_receiveDrawCompleted:
+    action: receive
+    channel: { $ref: '#/channels/drawCompleted' }
+    summary: Переводит группу в статус DRAWN (пары не сохраняет)
+    tags: [{ name: group-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/drawCompleted/messages/drawCompleted' }]
+  groupService_receiveGiftShipped:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftShipped' }
+    summary: Запоминает, что Санта и подопечный этого заказа больше не могут выйти из группы
+    tags: [{ name: group-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftShipped/messages/orderGiftShipped' }]
+  notificationService_receiveGiftShipped:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftShipped' }
+    summary: Отправляет подопечному GIFT_ON_THE_WAY
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftShipped/messages/orderGiftShipped' }]
+  notificationService_receiveGiftDelivered:
+    action: receive
+    channel: { $ref: '#/channels/orderGiftDelivered' }
+    summary: Отправляет подопечному GIFT_DELIVERED
+    tags: [{ name: notification-service }]
+    bindings: { $ref: '#/components/operationBindings/consumer' }
+    messages: [{ $ref: '#/channels/orderGiftDelivered/messages/orderGiftDelivered' }]
+
+components:
+  channelBindings:
+    groupEvents:
+      amqp:
+        is: routingKey
+        exchange: { name: group.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    drawEvents:
+      amqp:
+        is: routingKey
+        exchange: { name: draw.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    orderEvents:
+      amqp:
+        is: routingKey
+        exchange: { name: order.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+
+  operationBindings:
+    consumer:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+
+  messages:
+    GroupParticipantJoined:
+      name: group.participant-joined
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [groupId, participantId, userId, displayName, email]
+                properties:
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  participantId: { $ref: '#/components/schemas/Uuid' }
+                  userId: { $ref: '#/components/schemas/Uuid' }
+                  displayName: { type: string }
+                  email: { type: string, format: email }
+                  telegramChatId: { type: string }
+
+    GroupParticipantLeft:
+      name: group.participant-left
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [groupId, participantId, leftAt]
+                properties:
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  participantId: { $ref: '#/components/schemas/Uuid' }
+                  leftAt: { type: string, format: date-time }
+
+    GroupRegistrationClosed:
+      name: group.registration-closed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [groupId, participants, budget]
+                properties:
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  participants:
+                    type: array
+                    minItems: 3
+                    items:
+                      type: object
+                      required: [participantId, userId, displayName]
+                      properties:
+                        participantId: { $ref: '#/components/schemas/Uuid' }
+                        userId: { $ref: '#/components/schemas/Uuid' }
+                        displayName: { type: string }
+                  budget: { $ref: '#/components/schemas/Money' }
+
+    DrawCompleted:
+      name: draw.completed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [groupId, drawId, pairs]
+                properties:
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  drawId: { $ref: '#/components/schemas/Uuid' }
+                  pairs:
+                    type: array
+                    items:
+                      type: object
+                      required: [santaParticipantId, recipientParticipantId, recipientDisplayName]
+                      properties:
+                        santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                        recipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+                        recipientDisplayName: { type: string }
+
+    DrawReassigned:
+      name: draw.reassigned
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [groupId, drawId, leftParticipantId, santaParticipantId, newRecipientParticipantId, newRecipientDisplayName]
+                properties:
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  drawId: { $ref: '#/components/schemas/Uuid' }
+                  leftParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  newRecipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  newRecipientDisplayName: { type: string }
+
+    OrderGiftOrdered:
+      name: order.gift-ordered
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [giftOrderId, groupId, santaParticipantId, recipientParticipantId, productName]
+                properties:
+                  giftOrderId: { $ref: '#/components/schemas/Uuid' }
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  recipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  productName: { type: string }
+
+    OrderGiftFailed:
+      name: order.gift-failed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [giftOrderId, groupId, santaParticipantId, failureReason]
+                properties:
+                  giftOrderId: { $ref: '#/components/schemas/Uuid' }
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  failureReason: { $ref: '#/components/schemas/FailureReason' }
+
+    OrderGiftCancelled:
+      name: order.gift-cancelled
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [giftOrderId, groupId, santaParticipantId, recipientParticipantId, failureReason]
+                properties:
+                  giftOrderId: { $ref: '#/components/schemas/Uuid' }
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  recipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  failureReason: { $ref: '#/components/schemas/FailureReason' }
+
+    OrderGiftShipped:
+      name: order.gift-shipped
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [giftOrderId, groupId, santaParticipantId, recipientParticipantId]
+                properties:
+                  giftOrderId: { $ref: '#/components/schemas/Uuid' }
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  recipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+
+    OrderGiftDelivered:
+      name: order.gift-delivered
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EventEnvelope'
+          - type: object
+            properties:
+              data:
+                type: object
+                required: [giftOrderId, groupId, santaParticipantId, recipientParticipantId]
+                properties:
+                  giftOrderId: { $ref: '#/components/schemas/Uuid' }
+                  groupId: { $ref: '#/components/schemas/Uuid' }
+                  santaParticipantId: { $ref: '#/components/schemas/Uuid' }
+                  recipientParticipantId: { $ref: '#/components/schemas/Uuid' }
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, description: Сумма в копейках }
+        currency: { type: string, example: RUB }
+
+    FailureReason:
+      type: string
+      enum:
+        - OUT_OF_STOCK
+        - PAYMENT_DECLINED
+        - PRICE_EXCEEDS_BUDGET
+        - MARKETPLACE_UNAVAILABLE
+        - PAYMENT_PROVIDER_UNAVAILABLE
+        - PARTICIPANT_LEFT
+        - PRICE_CHANGED
+        - TIMEOUT
+
+    EventEnvelope:
+      type: object
+      description: Общий конверт всех событий
+      required: [eventId, eventType, occurredAt, producer, correlationId, data]
+      properties:
+        eventId:
+          $ref: '#/components/schemas/Uuid'
+        eventType:
+          type: string
+          example: order.gift-ordered
+        occurredAt:
+          type: string
+          format: date-time
+        producer:
+          type: string
+          enum: [group-service, draw-service, order-service]
+        correlationId:
+          $ref: '#/components/schemas/Uuid'
+        data:
+          type: object

@@ -1,0 +1,112 @@
+openapi: 3.0.3
+info:
+  title: Draw Service API
+  version: 0.1.0
+  description: |
+    Результаты жеребьевки. Сама жеребьевка запускается событием
+    group.registration-closed, а не запросом, поэтому в API ее нет.
+    Ответственный: Маша.
+servers:
+  - url: http://api-gateway
+    description: Через API Gateway
+  - url: http://draw-service:8080
+    description: Внутренний адрес
+
+paths:
+  /api/v1/groups/{groupId}/draw:
+    get:
+      operationId: getDrawStatus
+      summary: Статус жеребьевки
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Жеребьевка (без пар)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Draw' }
+        '404':
+          description: Группы нет или пользователь в ней не состоит (GROUP_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Регистрация еще не закрыта, жеребьевки нет (DRAW_NOT_COMPLETED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/groups/{groupId}/draw/my-recipient:
+    get:
+      operationId: getMyRecipient
+      summary: Мой подопечный
+      description: Только имя подопечного. Адрес Санте не показывается никогда.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Подопечный текущего пользователя
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MyRecipient' }
+        '404':
+          description: Группы нет или пользователь в ней не состоит (GROUP_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Жеребьевка еще не проведена (DRAW_NOT_COMPLETED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+
+  schemas:
+    DrawStatus:
+      type: string
+      enum: [PENDING, COMPLETED, FAILED]
+
+    Draw:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        groupId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/DrawStatus' }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time, nullable: true }
+
+    MyRecipient:
+      type: object
+      properties:
+        groupId: { type: string, format: uuid }
+        recipientParticipantId: { type: string, format: uuid }
+        recipientDisplayName: { type: string, example: Борис }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: DRAW_NOT_COMPLETED }
+        message: { type: string }
+        requestId: { type: string, format: uuid }

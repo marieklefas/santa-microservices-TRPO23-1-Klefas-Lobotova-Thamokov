@@ -1,0 +1,222 @@
+openapi: 3.0.3
+info:
+  title: Payment Service API
+  version: 0.1.0
+  description: |
+    Внутренний сервис платежей. Вызывает только Order Service.
+    Все операции идемпотентны: повтор запроса с тем же Idempotency-Key
+    возвращает сохраненный результат и не обращается к провайдеру повторно.
+    Ответственный: Маша.
+servers:
+  - url: http://payment-service:8080
+    description: Внутренний адрес (через API Gateway недоступен)
+
+paths:
+  /internal/payments/holds:
+    post:
+      operationId: holdPayment
+      security: []
+      summary: Заморозить сумму на карте
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HoldRequest' }
+      responses:
+        '201':
+          description: Сумма заморожена (HELD)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '200':
+          description: Повторный запрос, возвращен ранее созданный платеж
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '402':
+          description: Провайдер отклонил оплату (PAYMENT_DECLINED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Тот же ключ с другим телом запроса (IDEMPOTENCY_KEY_REUSED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/payments/{paymentId}:
+    get:
+      operationId: getPayment
+      security: []
+      summary: Статус платежа
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Платеж
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /internal/payments/{paymentId}/capture:
+    post:
+      operationId: capturePayment
+      security: []
+      summary: Списать замороженную сумму
+      description: |
+        HELD → CAPTURED. Если платеж уже CAPTURED, возвращается 200 без повторного списания.
+        Можно списать меньше замороженной суммы (если цена товара снизилась),
+        остаток холда провайдер размораживает автоматически. Больше замороженной суммы списать нельзя.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaptureRequest' }
+      responses:
+        '200':
+          description: Сумма списана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidState' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/payments/{paymentId}/release:
+    post:
+      operationId: releasePayment
+      security: []
+      summary: Отменить холд
+      description: HELD → RELEASED. Компенсация шага HOLD_PAYMENT.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Холд отменен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidState' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/payments/{paymentId}/refund:
+    post:
+      operationId: refundPayment
+      security: []
+      summary: Вернуть списанные деньги
+      description: CAPTURED → REFUNDED. Компенсация шага CAPTURE_PAYMENT.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Деньги возвращены
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidState' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+components:
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 'Формат: hold-{giftOrderId}, capture-{giftOrderId}, release-{giftOrderId}, refund-{giftOrderId}'
+      schema: { type: string }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+
+  responses:
+    NotFound:
+      description: Платежа нет (PAYMENT_NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidState:
+      description: Операция недопустима в текущем статусе платежа (INVALID_STATE)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Платежный провайдер недоступен, повторите позже (SERVICE_UNAVAILABLE)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: Сумма в копейках
+          example: 199000
+        currency: { type: string, example: RUB }
+
+    HoldRequest:
+      type: object
+      required: [giftOrderId, payerParticipantId, amount, paymentMethodToken]
+      properties:
+        giftOrderId: { type: string, format: uuid }
+        payerParticipantId: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        paymentMethodToken:
+          type: string
+          description: Токен карты от платежного провайдера
+
+    CaptureRequest:
+      type: object
+      description: Если тело не передано, списывается вся замороженная сумма
+      properties:
+        amount: { $ref: '#/components/schemas/Money' }
+
+    PaymentStatus:
+      type: string
+      enum: [CREATED, HELD, CAPTURED, RELEASED, REFUNDED, FAILED]
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        giftOrderId: { type: string, format: uuid }
+        payerParticipantId: { type: string, format: uuid }
+        amount: { type: integer }
+        currency: { type: string }
+        providerPaymentId: { type: string }
+        status: { $ref: '#/components/schemas/PaymentStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: PAYMENT_DECLINED }
+        message: { type: string }
+        requestId: { type: string, format: uuid }
